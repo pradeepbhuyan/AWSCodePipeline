@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Codepipeline uses for infrastructure App deployment.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Specifies the application environment.
+
+     
+Mappings:
+  # Define what EC2 type is to be used by Environment 
+  InstanceType:
+    Evaluation:
+      APP: 't2.micro'
+
+    Production:
+      APP: 't2.micro'
+     
+ 
+  DNSInfo:
+    Evaluation:
+      HostZoneName: 'ev.aamc.org'
+      AppZoneName: 'app.eval.aamc.org.'
+      HostZoneId:  Z09786302EH2M06DPNWQ9
+      PrivateZoneId: Z0968138FS8PEJQE5C5I
+      PublicZoneId:  Z35W2A8F8OO3ARs
+    
+  # SSL cert for ALB VIPs 
+  EnvironmentToSSL:
+    Evaluation:
+      SSL: arn:aws:acm:us-east-1:283046813627:certificate/c1e0f4ed-b91c-415b-a8a8-2e6d8611b14b
+  EnvironmentToVPC:
+    Evaluation:
+      VPC: vpc-3a3d2440  ## N.V region
+    Production:
+      VPC: vpc-1977ab72  ## Ohio region
+   
+  
+  EnvironmentToPublicSubnet:
+    Evaluation:
+      A: subnet-d931ac94
+      B: subnet-cde62bab
+      
+    Production:
+      A: subnet-008c4b6b
+      B: subnet-113b066b
+      
+  EnvironmentToAmazonAMI:
+    Evaluation:
+      HVM64: ami-08f3d892de259504d # n.virginia
+      
+    Production:
+      HVM64: ami-0a54aef4ef3b5f881 #  ohi region
+  
+  AppToEnvironmentHosts:
+    Evaluation:
+      APPInstance1: ev-u-app-instance-01
+      APPInstance2: ev-u-app-instance-02
+      
+    Production:
+      APPInstance1: pd-u-app-instance-01
+      APPInstance2: pd-u-app-instance-02
+
+Resources:
+  
+  #### SECURITY GROUPS ####
+  # HYperic Servers
+  EC2APP:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allowing Internal SSH and application ports - 22,7080,7443,2144'
+      VpcId:
+        Fn::FindInMap:
+          - EnvironmentToVPC
+          - !Ref 'Environment'
+          - VPC
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ App-EC2-SG, !Ref Environment] ]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+
+ 
+  # ELB Security Group allowing Port 80 from anywhere
+  ALBhttps:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Port 80, 443, and ICMP
+      VpcId:
+        Fn::FindInMap:
+          - EnvironmentToVPC
+          - !Ref 'Environment'
+          - VPC
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [ APP-ELB-SG, !Ref Environment] ]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  APPInstance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            Encrypted: true
+        - DeviceName: /dev/sdb
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp2
+            Encrypted: true
+      ImageId:
+        Fn::FindInMap:
+          - EnvironmentToAmazonAMI
+          - !Ref 'Environment'
+          - HVM64
+      
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !FindInMap [ InstanceType, !Ref 'Environment', APP]
+      #KeyName: 'AWSDEMO'
+      Monitoring: 'false'
+      SubnetId: 
+        Fn::FindInMap:
+          - EnvironmentToPublicSubnet
+          - !Ref 'Environment'
+          - A
+      SecurityGroupIds:
+        - !Ref EC2APP
+      Tenancy: default
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            yum install httpd -y
+            echo "APP Instance1" > /var/www/html/index.html
+            service httpd start
+            chkconfig httpd on
+      
+      Tags:
+        -
+          Key: Name
+          Value:
+            Fn::FindInMap:
+              - AppToEnvironmentHosts
+              - !Ref 'Environment'
+              - APPInstance1
+
+    ############APP instance2
+  APPInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        -
+          DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            Encrypted: true
+        - DeviceName: /dev/sdb
+          Ebs:
+            VolumeSize: 10
+            VolumeType: gp2
+            Encrypted: true
+      ImageId:
+        Fn::FindInMap:
+          - EnvironmentToAmazonAMI
+          - !Ref 'Environment'
+          - HVM64
+      #IamInstanceProfile: AAMC-EC2FullAccess
+      InstanceInitiatedShutdownBehavior: stop
+      InstanceType: !FindInMap [ InstanceType, !Ref 'Environment', APP]
+      #KeyName: 'AWSDEMO'
+      Monitoring: 'false' 
+      SubnetId: 
+        Fn::FindInMap:
+          - EnvironmentToPublicSubnet
+          - !Ref 'Environment'
+          - B
+      SecurityGroupIds:
+        - !Ref EC2APP
+      Tenancy: default
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            yum install httpd -y
+            echo "APP Instance2" > /var/www/html/index.html
+            service httpd start
+            chkconfig httpd on
+      Tags:
+        -
+          Key: Name
+          Value:
+            Fn::FindInMap:
+              - AppToEnvironmentHosts
+              - !Ref 'Environment'
+              - APPInstance2
+
+     #### LOAD BALANCERS ####
+  # ALB: app.aamc.org
+  APPLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        
+        - Key: deletion_protection.enabled
+          Value: false  # change this to true. This will add extra security net from deleting this ALB.
+      Name: !Join [ '-', [ APPALB, !Ref Environment] ]
+      Scheme: internet-facing
+      Subnets: 
+        - !FindInMap [ EnvironmentToPublicSubnet, !Ref 'Environment', A]
+        - !FindInMap [ EnvironmentToPublicSubnet, !Ref 'Environment', B]
+
+      SecurityGroups:
+        - !Ref ALBhttps
+
+  ############# TARGET GROUPS ####
+  # TG: APP TG
+  APPTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 'APP-TG'
+      HealthCheckIntervalSeconds: 9
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 3
+      HealthyThresholdCount: 5
+      HealthCheckPath: '/'     
+      Matcher:
+        HttpCode: '200'
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      Targets:
+        - Id:
+            !Ref APPInstance1
+          Port: 80
+        - Id:
+            !Ref APPInstance2
+          Port: 80
+      UnhealthyThresholdCount: 3
+      VpcId:
+        Fn::FindInMap:
+          - EnvironmentToVPC
+          - !Ref 'Environment'
+          - VPC
+    
+  # ALB LISTENER: DemoApp.aamc.org
+  APPHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - RedirectConfig:
+            Host: "#{host}"
+            Path: "/#{path}"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: redirect
+      LoadBalancerArn:
+        !Ref APPLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  APPListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref APPTG
+      Conditions:
+        - Field: host-header
+          Values: 
+            - !GetAtt APPLoadBalancer.DNSName
+      ListenerArn: !Ref APPHTTPListener
+      Priority: 1
+
+ ###########output 
+
+Outputs:
+    ALBARN:
+        Value: !Ref APPLoadBalancer
+    ALBDNSName:
+        Value: !GetAtt APPLoadBalancer.DNSName
+    EC2APPInstance1:
+      Value: !Ref APPInstance1
+    EC2APPInstance2:
+      Value: !Ref APPInstance2
+    APPSG:
+      Value: !Ref EC2APP
+    APPALBSG:
+      Value: !Ref ALBhttps
